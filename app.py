@@ -53,25 +53,25 @@ def get_fused_data():
     std = 1.1950717918110398
 
     #  TODO: Convert the mean and std to ee.Number    
-    vmu = 
-    vstd = 
+    vmu = ee.Number(mean)
+    vstd = ee.Number(std)
 
     #  TODO: Load the COPERNICUS/S2 dataset and filter dates "2015-07-01","2015-12-31"
-    se2 = 
+    se2 = ee.ImageCollection("COPERNICUS/S2").filterDate("2015-07-01","2015-12-31")
     # TODO: Use the filterBounds function to get filter the are specified in ROI
-    se2 = 
+    se2 = se2.filterBounds(roi) 
 
     #  TODO: Keep pixels that have less than 20% cloud
-    se2 = 
+    se2 = se2.filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE",20))
 
     # TODO:Update the mask 
-    se2 = 
+    se2 = se2.map(se2mask)
 
     # TODO:Get the median image
-    se2 = 
+    se2 = se2.median()
 
     # TODO: select the `se2bands`
-    se2 = 
+    se2 = se2.select(se2bands)
     
 
     #  Load the NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG dataset and filter dates "2015-07-01","2015-12-31"
@@ -79,10 +79,11 @@ def get_fused_data():
         "2015-07-01","2015-12-31").filterBounds(roi).median().select('avg_rad').clip(roi))
 
     # TODO: Substract the mean and divide by the standard deviation for the viirs samples
-    viirsclean = 
+   
+    viirsclean = viirs.subtract(vmu).divide(vstd) 
 
     # TODO: Fuse the two datasets
-    fusedclean = 
+    fusedclean = se2.addBands(viirsclean)
 
     return fusedclean
 
@@ -92,13 +93,15 @@ gee_data = get_fused_data()
 
 def get_features(longitude, latitude):
     # TODO: Create an ee.Geometry instance from the coordinates
-    poi_geometry = 
+    poi_geometry = ee.Geometry.Point([longitude, latitude])
 
     # TODO: Sample features for the given point of interest keeping only the training bands
-    dataclean = 
+    dataclean = fusedclean.select(trainingbands).sampleRegions(collection=points,
+                                                        properties=[label],
+                                                        scale=scaleFactor)
 
     # TODO: use getInfo to load the sample's features
-    sample = 
+    sample = dataclean.getInfo()
 
     # Find the band ordering in the loaded data
     band_order = sample['properties']['band_order']
@@ -107,7 +110,7 @@ def get_features(longitude, latitude):
     nested_list = dataclean.reduceColumns(ee.Reducer.toList(len(band_order)), band_order).values().get(0)
 
     # TODO: Convert the `nested_list` to a Pandas dataframe
-    data = 
+    data = pd.DataFrame(nested_list.getInfo(), columns=band_order)
     return data
 
 @app.route('/')
@@ -121,10 +124,10 @@ def predict():
     longitude = float(features['longitude'])
     latitude = float(features['latitude'])
     # TODO: get the features for the given location
-    final_features = 
+    final_features = get_features(longitude, latitude)
     
     # TODO: get predictions from the the model using the features loaded
-    prediction = 
+    prediction = model.predict(final_features)
 
     # convert the prediction to an integer
     output = int(prediction[0])
