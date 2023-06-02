@@ -41,7 +41,18 @@ def se2mask(image):
         This function updates a mask of an ee.Image so that clouds are filtered.
     """
     #TODO: complete this function
-    pass
+    qa = image.select('QA60')
+
+    # Bits 10 and 11 represent the cloud and cirrus flags, respectively
+    # Set all other bits (0-9) to 0 to isolate cloud and cirrus flags
+    cloud_mask = qa.bitwiseAnd(1 << 10).neq(0).Or(qa.bitwiseAnd(1 << 11).neq(0))
+
+    # Update the mask of the input image using the cloud mask
+    masked_image = image.updateMask(cloud_mask.not())
+
+    return masked_image
+
+    
 
 def get_fused_data():
     """
@@ -62,10 +73,10 @@ def get_fused_data():
     se2 = se2.filterBounds(roi) 
 
     #  TODO: Keep pixels that have less than 20% cloud
-    se2 = se2.filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE",20))
+    se2 = se2.map(se2mask)
 
     # TODO:Update the mask 
-    se2 = se2.map(se2mask)
+    se2 = se2.median().clip(roi).updateMask(se2mask(se2))
 
     # TODO:Get the median image
     se2 = se2.median()
