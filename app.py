@@ -1,5 +1,4 @@
 import ee
-
 import numpy as np
 import pandas as pd
 from flask import Flask, request, render_template
@@ -21,126 +20,103 @@ ee.Initialize(credentials)
 # Initialize variables required for GEE dataset preprocessing (similar to the examples in Exercise 6_1)
 lat = -1.9441
 lon = 30.0619
-offset = 0.51
+offset = 10
 region = [
-        [lon + offset, lat - offset],
-        [lon + offset, lat + offset],
-        [lon - offset, lat + offset],
-        [lon - offset, lat - offset]]
+    [lon + offset, lat - offset],
+    [lon + offset, lat + offset],
+    [lon - offset, lat + offset],
+    [lon - offset, lat - offset]
+]
 
-roi = ee.Geometry.Polygon([region])
+roi = ee.Geometry.Polygon(region)
 
-se2bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7','B8','B8A']
+se2bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A']
 trainingbands = se2bands + ['avg_rad']
 label = 'smod_code'
-scaleFactor=1000
+scaleFactor = 1000
 
-# Remember this function from Exercise 5_03, what does it do?
-def se2mask(image):
-    """
-        This function updates a mask of an ee.Image so that clouds are filtered.
-    """
-    #TODO: complete this function
-    qa = image.select('QA60')
 
-    # Bits 10 and 11 represent the cloud and cirrus flags, respectively
-    # Set all other bits (0-9) to 0 to isolate cloud and cirrus flags
-    cloud_mask = qa.bitwiseAnd(1 << 10).neq(0).Or(qa.bitwiseAnd(1 << 11).neq(0))
+def se2mask(img):
+    # Select the QA60 band
+    qa60 = img.select('QA60')
+    # A 1 at bit position 10 of QA60 band indicates a cloud
+    cloud_bitmask = 1 << 10
+    # Generate a mask for points that are not cloud
+    mask_non_cloud = qa60.bitwiseAnd(cloud_bitmask).eq(0)
 
-    # Update the mask of the input image using the cloud mask
-    masked_image = image.updateMask(cloud_mask.not())
+    # A 1 at bit position 11 of QA60 band indicates a cirrus
+    cirrus_bitmask = 1 << 11
+    # Generate a mask for points that are not cirrus
+    mask_non_cirrus = qa60.bitwiseAnd(cirrus_bitmask).eq(0)
 
-    return masked_image
+    # Combine the two masks
+    mask = mask_non_cloud.And(mask_non_cirrus)
 
-    
+    # Apply the combined mask to the image, scale the image values, select all bands ('B.*'),
+    # and copy over the 'system:time_start' property
+    masked_img = img.updateMask(mask).multiply(0.0001).select('B.*').copyProperties(img, ['system:time_start'])
+
+    return masked_img
+
 
 def get_fused_data():
-    """
-        This function contains the preprocessing steps followed to obtain the preprocessed, merged dataset in 6_1.
-        This function is called when the server starts to prepare the dataset.
-    """
-    # Use the mean and standard deviation obtained from the training dataset
     mean = 0.2062830612359614
     std = 1.1950717918110398
 
-    #  TODO: Convert the mean and std to ee.Number    
     vmu = ee.Number(mean)
     vstd = ee.Number(std)
 
-    #  TODO: Load the COPERNICUS/S2 dataset and filter dates "2015-07-01","2015-12-31"
-    se2 = ee.ImageCollection("COPERNICUS/S2").filterDate("2015-07-01","2015-12-31")
-    # TODO: Use the filterBounds function to get filter the are specified in ROI
-    se2 = se2.filterBounds(roi) 
-
-    #  TODO: Keep pixels that have less than 20% cloud
+    se2 = ee.ImageCollection("COPERNICUS/S2").filterDate("2015-07-01", "2015-12-31")
+    se2 = se2.filterBounds(roi)
     se2 = se2.map(se2mask)
-
-    # TODO:Update the mask 
-    se2 = se2.median().clip(roi).updateMask(se2mask(se2))
-
-    # TODO:Get the median image
-    se2 = se2.median()
-
-    # TODO: select the `se2bands`
+    se2 = se2.median().select(se2bands).divide(scaleFactor).clip(roi)
+    # se2 = se2.median()
     se2 = se2.select(se2bands)
-    
 
-    #  Load the NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG dataset and filter dates "2015-07-01","2015-12-31"
-    viirs = ee.Image(ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG").filterDate(
-        "2015-07-01","2015-12-31").filterBounds(roi).median().select('avg_rad').clip(roi))
+    viirs = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG").filterDate(
+        "2015-07-01", "2015-12-31").filterBounds(roi).median().select('avg_rad').clip(roi)
 
-    # TODO: Substract the mean and divide by the standard deviation for the viirs samples
-   
-    viirsclean = viirs.subtract(vmu).divide(vstd) 
+    viirsclean = viirs.subtract(mean).divide(std)
 
-    # TODO: Fuse the two datasets
-    fusedclean = se2.addBands(viirsclean)
+    fusedclean = viirsclean.addBands(se2)
 
     return fusedclean
 
-# Prepare the fused 
-gee_data = get_fused_data()
-
 
 def get_features(longitude, latitude):
-    # TODO: Create an ee.Geometry instance from the coordinates
-    poi_geometry = ee.Geometry.Point([longitude, latitude])
+    poi_geometry = ee.Geometry.Point(longitude, latitude)
 
-    # TODO: Sample features for the given point of interest keeping only the training bands
-    dataclean = fusedclean.select(trainingbands).sampleRegions(collection=points,
-                                                        properties=[label],
-                                                        scale=scaleFactor)
-
-    # TODO: use getInfo to load the sample's features
-    sample = dataclean.getInfo()
-
-    # Find the band ordering in the loaded data
-    band_order = sample['properties']['band_order']
-
-    # Convert the loaded data to ee.List
+    fused_data = get_fused_data()
+    
+    dataclean = fused_data.sampleRegions(
+        collection=ee.FeatureCollection(ee.Feature(poi_geometry)), 
+        properties=[label], scale=30, geometries=True).select(trainingbands)
+    
+    # Specify the band names based on your dataset
+    band_order = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'avg_rad']
+    
     nested_list = dataclean.reduceColumns(ee.Reducer.toList(len(band_order)), band_order).values().get(0)
-
-    # TODO: Convert the `nested_list` to a Pandas dataframe
     data = pd.DataFrame(nested_list.getInfo(), columns=band_order)
+
     return data
+
+
+
+
+
 
 @app.route('/')
 def home():
     return render_template('index.html')
 
+
 @app.route('/predict', methods=['POST'])
 def predict():
-
     features = request.form.to_dict()
     longitude = float(features['longitude'])
     latitude = float(features['latitude'])
-    # TODO: get the features for the given location
     final_features = get_features(longitude, latitude)
-    
-    # TODO: get predictions from the the model using the features loaded
     prediction = model.predict(final_features)
-
-    # convert the prediction to an integer
     output = int(prediction[0])
 
     if output == 1:
@@ -148,8 +124,8 @@ def predict():
     else:
         text = "not built up land"
 
-    # Return a response based on the output of the model
-    return render_template('index.html', prediction_text='The area at {}, {} location is {}'.format(longitude, latitude, text))
+    return render_template('index.html', prediction_text='The area at {}, {} location is {}'.format(
+        longitude, latitude, text))
 
 
 if __name__ == "__main__":
